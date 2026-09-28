@@ -339,7 +339,7 @@ function severityLabel(severity: Severity) {
   return "一致性提醒";
 }
 
-function exportHtml(project: ChapterProject) {
+function exportHtml(project: ChapterProject, allIssues: AccessibilityIssue[]) {
   const body = project.blocks.map((block) => {
     if (block.type === "heading") {
       const level = Math.min(6, Math.max(1, block.headingLevel ?? 2));
@@ -353,6 +353,43 @@ function exportHtml(project: ChapterProject) {
     }
     return `<p>${escapeHtml(block.accessibleText || block.text)}</p>`;
   }).join("\n      ");
+
+  const total = project.blocks.length;
+  const counts: Record<ReviewStatus, number> = {
+    approved: project.blocks.filter((block) => block.reviewStatus === "approved").length,
+    "needs-work": project.blocks.filter((block) => block.reviewStatus === "needs-work").length,
+    pending: project.blocks.filter((block) => block.reviewStatus === "pending").length,
+  };
+  const issueCounts: Record<Severity, number> = {
+    error: allIssues.filter((issue) => issue.severity === "error").length,
+    warning: allIssues.filter((issue) => issue.severity === "warning").length,
+    info: allIssues.filter((issue) => issue.severity === "info").length,
+  };
+  const issueRows = allIssues.length ? allIssues.map((issue) => {
+    const block = blockById(project.blocks, issue.blockId);
+    const order = block ? project.blocks.indexOf(block) + 1 : 0;
+    return `<tr>
+      <td>${escapeHtml(severityLabel(issue.severity))}</td>
+      <td>第 ${order} 块 · ${escapeHtml(blockRole(block as ContentBlock))}</td>
+      <td>${escapeHtml(issue.title)}</td>
+      <td>${escapeHtml(statusLabel(issueReviewStatus(issue)))}</td>
+    </tr>`;
+  }).join("\n        ") : `<tr><td colspan="4">无遗留问题</td></tr>`;
+  const blockRows = project.blocks.map((block, index) => {
+    const blockIssues = allIssues.filter((issue) => issue.blockId === block.id);
+    const issueText = blockIssues.length
+      ? blockIssues.map((issue) => `${escapeHtml(severityLabel(issue.severity))}：${escapeHtml(issue.title)}`).join("<br>")
+      : "无";
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(blockRole(block))}</td>
+      <td class="review-status review-status-${block.reviewStatus}">${escapeHtml(statusLabel(block.reviewStatus))}</td>
+      <td class="review-reason${block.changeReason.trim() ? "" : " review-no-reason"}">${escapeHtml(block.changeReason.trim() || "（未记录改写原因）")}</td>
+      <td class="review-issue">${issueText}</td>
+    </tr>`;
+  }).join("\n        ");
+  const exportedAt = new Date().toLocaleString();
+
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -366,14 +403,62 @@ function exportHtml(project: ChapterProject) {
     a:focus-visible, [tabindex]:focus-visible { outline: 4px solid #d08a00; outline-offset: 3px; }
     h1, h2, h3, h4, h5, h6 { line-height: 1.4; margin-top: 1.8em; }
     figure { margin: 2em 0; } img { max-width: 100%; height: auto; } figcaption { font-size: .86em; color: #46554f; }
-    .skip { position: absolute; left: -9999px; } .skip:focus { position: static; display: inline-block; padding: .5em; background: #fff; }
+    .skip-links { position: absolute; left: -9999px; }
+    .skip-links a:focus { position: static; display: inline-block; padding: .5em; background: #fff; }
+    .review-summary { margin-top: 3em; padding: 1.2em 1.4em; border: 1px solid #cfdad4; border-left: 5px solid #1f4a3e; border-radius: 10px; background: #f4f8f5; font-size: .82em; line-height: 1.7; }
+    .review-summary h2 { margin-top: 0; font-size: 1.3em; }
+    .review-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; list-style: none; margin: .6em 0 1em; padding: 0; }
+    .review-stats b { font-size: 1.15em; }
+    .review-table-wrap { overflow-x: auto; }
+    .review-summary table { width: 100%; border-collapse: collapse; margin: .5em 0 1em; }
+    .review-summary th, .review-summary td { border: 1px solid #cdd8d1; padding: .4em .55em; text-align: left; vertical-align: top; }
+    .review-summary th { background: #e6efe9; }
+    .review-status-approved { color: #1f6b47; font-weight: 700; }
+    .review-status-needs-work { color: #98261f; font-weight: 700; }
+    .review-status-pending { color: #8a5209; font-weight: 700; }
+    .review-no-reason { color: #98261f; }
+    .review-meta { color: #46554f; font-size: .92em; }
   </style>
 </head>
 <body>
-  <a class="skip" href="#main">跳到正文</a>
+  <nav class="skip-links" aria-label="页面跳转">
+    <a class="skip" href="#main">跳到正文</a>
+    <a class="skip" href="#review-summary">跳到审校摘要</a>
+  </nav>
   <main id="main" tabindex="-1">
       ${body}
   </main>
+  <aside id="review-summary" class="review-summary" tabindex="-1" aria-label="审校摘要">
+    <h2>审校摘要（交接复审）</h2>
+    <p class="review-meta">教材：${escapeHtml(project.title)} · 导出时间：${escapeHtml(exportedAt)}</p>
+    <ul class="review-stats">
+      <li>内容块：<b>${total}</b></li>
+      <li class="review-status-approved">已通过：<b>${counts.approved}</b></li>
+      <li class="review-status-pending">待审核：<b>${counts.pending}</b></li>
+      <li class="review-status-needs-work">需修改：<b>${counts["needs-work"]}</b></li>
+      <li>必须修复：<b>${issueCounts.error}</b></li>
+      <li>建议优化：<b>${issueCounts.warning}</b></li>
+      <li>术语提醒：<b>${issueCounts.info}</b></li>
+    </ul>
+    <h3>各块状态、改写原因与剩余问题</h3>
+    <div class="review-table-wrap">
+      <table>
+        <thead><tr><th scope="col">#</th><th scope="col">内容块</th><th scope="col">审核状态</th><th scope="col">改写原因</th><th scope="col">剩余问题</th></tr></thead>
+        <tbody>
+        ${blockRows}
+        </tbody>
+      </table>
+    </div>
+    <h3>剩余问题清单</h3>
+    <div class="review-table-wrap">
+      <table>
+        <thead><tr><th scope="col">严重程度</th><th scope="col">位置</th><th scope="col">问题</th><th scope="col">所在块状态</th></tr></thead>
+        <tbody>
+        ${issueRows}
+        </tbody>
+      </table>
+    </div>
+  </aside>
 </body>
 </html>`;
 }
@@ -408,12 +493,151 @@ let activeIssueId = "";
 let previewMode: "normal" | "assisted" = "normal";
 let selectedVersionId = "";
 let showGlossary = false;
+let issueSeverityFilter: Severity | "all" = "all";
+let issueStatusFilter: ReviewStatus | "all" = "all";
+let compareVersionId = "";
+let restoreVersionId = "";
 let undoStack: ChapterProject[] = [];
 let redoStack: ChapterProject[] = [];
 let saveTimer = 0;
 
 const activeBlock = () => project.blocks.find((block) => block.id === activeBlockId) ?? project.blocks[0];
 const issues = () => analyze(project);
+const blockById = (blocks: ContentBlock[], id: string) => blocks.find((block) => block.id === id);
+
+function issueReviewStatus(issue: AccessibilityIssue): ReviewStatus {
+  return blockById(project.blocks, issue.blockId)?.reviewStatus ?? "pending";
+}
+
+function filteredIssues() {
+  return issues().filter((issue) => {
+    if (issueSeverityFilter !== "all" && issue.severity !== issueSeverityFilter) return false;
+    if (issueStatusFilter !== "all" && issueReviewStatus(issue) !== issueStatusFilter) return false;
+    return true;
+  });
+}
+
+function blockDisplayText(block: ContentBlock | undefined) {
+  if (!block) return "";
+  return block.type === "image"
+    ? block.imageAlt || block.accessibleText || block.text
+    : block.accessibleText || block.text;
+}
+
+function blockSnippet(block: ContentBlock, length = 42) {
+  const raw = blockDisplayText(block).replace(/\s+/g, " ").trim() || "（无文本内容）";
+  return raw.length > length ? `${raw.slice(0, length)}…` : raw;
+}
+
+/** 内容块的可审校字段是否相同（ID 相同但内容不同 = 已改写）。 */
+function blockContentEqual(a: ContentBlock, b: ContentBlock) {
+  const keys: (keyof ContentBlock)[] = [
+    "type",
+    "text",
+    "accessibleText",
+    "headingLevel",
+    "imageSrc",
+    "imageAlt",
+    "linkHref",
+    "changeReason",
+    "reviewStatus",
+    "comments",
+  ];
+  return keys.every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key]));
+}
+
+type AlignKind = "same" | "changed" | "removed" | "added";
+interface AlignedRow {
+  kind: AlignKind;
+  oldBlock?: ContentBlock;
+  newBlock?: ContentBlock;
+}
+
+/**
+ * 按块 ID 的最长公共序列对齐快照与当前章节，
+ * 保证快照中缺失的块仍在原始位置呈现，不会错位覆盖其他内容。
+ */
+function alignBlocks(oldBlocks: ContentBlock[], newBlocks: ContentBlock[]): AlignedRow[] {
+  const m = oldBlocks.length;
+  const n = newBlocks.length;
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i -= 1) {
+    for (let j = n - 1; j >= 0; j -= 1) {
+      lcs[i][j] = oldBlocks[i].id === newBlocks[j].id
+        ? lcs[i + 1][j + 1] + 1
+        : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const rows: AlignedRow[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (oldBlocks[i].id === newBlocks[j].id) {
+      const kind: AlignKind = blockContentEqual(oldBlocks[i], newBlocks[j]) ? "same" : "changed";
+      rows.push({ kind, oldBlock: oldBlocks[i], newBlock: newBlocks[j] });
+      i += 1;
+      j += 1;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      rows.push({ kind: "removed", oldBlock: oldBlocks[i] });
+      i += 1;
+    } else {
+      rows.push({ kind: "added", newBlock: newBlocks[j] });
+      j += 1;
+    }
+  }
+  while (i < m) rows.push({ kind: "removed", oldBlock: oldBlocks[i++] });
+  while (j < n) rows.push({ kind: "added", newBlock: newBlocks[j++] });
+  return rows;
+}
+
+function glossaryEqual(a: GlossaryTerm[], b: GlossaryTerm[]) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * 用快照替换当前章节：以块 ID 的最长公共序列为锚，
+ * - 公共块用快照内容按 ID 覆盖（绝不按位置串位）；
+ * - 快照里有、当前缺失的块插回原相对位置；
+ * - 当前新增的块保留在当前相对位置。
+ */
+function restoreBlocks(snapshotBlocks: ContentBlock[], currentBlocks: ContentBlock[]) {
+  const m = snapshotBlocks.length;
+  const n = currentBlocks.length;
+  const lcs: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i -= 1) {
+    for (let j = n - 1; j >= 0; j -= 1) {
+      lcs[i][j] = snapshotBlocks[i].id === currentBlocks[j].id
+        ? lcs[i + 1][j + 1] + 1
+        : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const restored: ContentBlock[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (snapshotBlocks[i].id === currentBlocks[j].id) {
+      restored.push(structuredClone(snapshotBlocks[i]));
+      i += 1;
+      j += 1;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      restored.push(structuredClone(snapshotBlocks[i++]));
+    } else {
+      restored.push(structuredClone(currentBlocks[j++]));
+    }
+  }
+  while (i < m) restored.push(structuredClone(snapshotBlocks[i++]));
+  while (j < n) restored.push(structuredClone(currentBlocks[j++]));
+  return restored;
+}
+
+function flashSourceCard(blockId: string) {
+  requestAnimationFrame(() => {
+    const card = app.querySelector<HTMLElement>(`.source-card[data-block-id="${CSS.escape(blockId)}"]`);
+    card?.scrollIntoView({ behavior: "smooth", block: "center" });
+    card?.classList.add("flash-target");
+    window.setTimeout(() => card?.classList.remove("flash-target"), 1800);
+  });
+}
 
 function saveSoon() {
   window.clearTimeout(saveTimer);
@@ -462,6 +686,7 @@ function updateActiveBlock(update: (block: ContentBlock, draft: ChapterProject) 
 
 function render() {
   const list = issues();
+  const visibleIssues = filteredIssues();
   const active = activeBlock();
   const activeIssues = list.filter((issue) => issue.blockId === active.id);
   const approved = project.blocks.filter((block) => block.reviewStatus === "approved").length;
@@ -529,7 +754,7 @@ function render() {
               <p>${escapeHtml(issue.detail)}</p><small>${escapeHtml(issue.suggestion)}</small>
             </div>`).join("")}</div>` : `<div class="issue-clear">✓ 当前内容块没有新的无障碍问题</div>`}
 
-          <section class="edit-card source-card">
+          <section class="edit-card source-card" data-block-id="${active.id}">
             <div class="section-heading"><div><span class="eyebrow">原教材</span><h2>${active.type === "image" ? "图片信息" : active.type === "link" ? "链接信息" : "原文"}</h2></div><sl-badge variant="neutral">${active.type}</sl-badge></div>
             ${renderSourceEditor(active)}
           </section>
@@ -573,9 +798,30 @@ function render() {
           </section>
 
           <section class="issues-panel">
-            <div class="section-heading"><div><span class="eyebrow">All checks</span><h2>全章问题</h2></div><sl-button size="small" variant="default" outline data-action="approve-all">全部通过</sl-button></div>
+            <div class="section-heading"><div><span class="eyebrow">Review handoff</span><h2>全章问题交接</h2></div><sl-button size="small" variant="default" outline data-action="approve-all">全部通过</sl-button></div>
+            <div class="issue-filters">
+              <div class="filter-row" role="group" aria-label="按严重程度筛选">
+                <span class="filter-label">严重程度</span>
+                ${(["all", "error", "warning", "info"] as const).map((severity) => {
+                  const count = severity === "all" ? list.length : list.filter((issue) => issue.severity === severity).length;
+                  const label = severity === "all" ? "全部" : severityLabel(severity);
+                  return `<button class="filter-chip ${issueSeverityFilter === severity ? "active" : ""}" data-action="filter-severity" data-value="${severity}">${label}<em>${count}</em></button>`;
+                }).join("")}
+              </div>
+              <div class="filter-row" role="group" aria-label="按审核状态筛选">
+                <span class="filter-label">审核状态</span>
+                ${(["all", "pending", "needs-work", "approved"] as const).map((status) => {
+                  const count = status === "all" ? list.length : list.filter((issue) => issueReviewStatus(issue) === status).length;
+                  const label = status === "all" ? "全部" : statusLabel(status);
+                  return `<button class="filter-chip ${issueStatusFilter === status ? "active" : ""}" data-action="filter-status" data-value="${status}">${label}<em>${count}</em></button>`;
+                }).join("")}
+              </div>
+            </div>
             <div class="issue-list">
-              ${list.length ? list.map((issue) => `<button class="${issue.id === activeIssueId ? "active" : ""} ${issue.severity}" data-action="jump-issue" data-issue-id="${issue.id}" data-block-id="${issue.blockId}"><span>${severityLabel(issue.severity)}</span><b>${escapeHtml(issue.title)}</b><small>段 ${project.blocks.findIndex((block) => block.id === issue.blockId) + 1} · ${escapeHtml(issue.suggestion)}</small></button>`).join("") : `<div class="issue-clear">✓ 全章检查通过</div>`}
+              ${visibleIssues.length ? visibleIssues.map((issue) => {
+                const status = issueReviewStatus(issue);
+                return `<button class="${issue.id === activeIssueId ? "active" : ""} ${issue.severity}" data-action="jump-issue" data-issue-id="${issue.id}" data-block-id="${issue.blockId}"><span>${severityLabel(issue.severity)} · ${statusLabel(status)}</span><b>${escapeHtml(issue.title)}</b><small>段 ${project.blocks.findIndex((block) => block.id === issue.blockId) + 1} · ${escapeHtml(issue.suggestion)}</small></button>`;
+              }).join("") : `<div class="issue-clear">${list.length ? "✓ 当前筛选条件下没有问题" : "✓ 全章检查通过"}</div>`}
             </div>
           </section>
 
@@ -584,12 +830,16 @@ function render() {
             ${project.versions.length ? `
               <sl-select id="version-select" size="small" value="${version?.id ?? ""}">${project.versions.map((item) => `<sl-option value="${item.id}">${escapeHtml(item.label)} · ${new Date(item.createdAt).toLocaleTimeString()}</sl-option>`).join("")}</sl-select>
               <div class="version-diff">${version ? renderVersionDiff(version, active) : ""}</div>
+              <div class="version-actions">
+                <sl-button size="small" variant="primary" outline data-action="open-compare">并排查看整章变化</sl-button>
+                <sl-button size="small" variant="warning" outline data-action="open-restore">恢复到此版本</sl-button>
+              </div>
             ` : `<div class="empty-note">保存版本后，可比较改写前后的无障碍文本。</div>`}
           </section>
         </aside>
       </div>
 
-      <footer class="statusbar"><span>最近操作：${escapeHtml(document.documentElement.dataset.lastAction || "示例章节已载入")}</span><span>${project.blocks.length} 个内容块 · ${list.length} 个待处理问题</span></footer>
+      <footer class="statusbar"><span>最近操作：${escapeHtml(document.documentElement.dataset.lastAction || "示例章节已载入")}</span><span>${project.blocks.length} 个内容块 · ${list.length} 个待处理问题${visibleIssues.length !== list.length ? `（筛选显示 ${visibleIssues.length} 个）` : ""}</span></footer>
     </div>
 
     <sl-dialog label="全书术语表" ${showGlossary ? "open" : ""} data-dialog="glossary">
@@ -598,7 +848,10 @@ function render() {
       </div>
       <div class="term-add"><sl-input id="new-term-source" placeholder="原文术语"></sl-input><sl-input id="new-term-preferred" placeholder="统一表达"></sl-input><sl-button variant="primary" data-action="add-term">添加术语</sl-button></div>
       <sl-button slot="footer" variant="primary" data-action="close-glossary">完成</sl-button>
-    </sl-dialog>`;
+    </sl-dialog>
+
+    ${renderCompareDialog()}
+    ${renderRestoreDialog()}`;
 
   wireLiveFields();
 }
@@ -644,8 +897,95 @@ function renderPreview() {
 
 function renderVersionDiff(version: VersionSnapshot, current: ContentBlock) {
   const oldBlock = version.blocks.find((block) => block.id === current.id);
-  if (!oldBlock) return `<div class="empty-note">当前内容块不在该版本中。</div>`;
+  if (!oldBlock) return `<div class="empty-note">当前内容块不在该版本中。下方可并排查看整章变化。</div>`;
   return `<div class="diff-column"><span>旧版</span><p>${escapeHtml(oldBlock.accessibleText || oldBlock.text)}</p></div><div class="diff-column current"><span>当前</span><p>${escapeHtml(current.accessibleText || current.text)}</p></div>`;
+}
+
+function renderCompareCell(row: AlignedRow, side: "old" | "new") {
+  const block = side === "old" ? row.oldBlock : row.newBlock;
+  if (!block) {
+    const note = side === "old"
+      ? (row.kind === "added" ? "快照中不存在，属当前新增块" : "—")
+      : (row.kind === "removed" ? "当前已删除，恢复时将插回原相对位置" : "—");
+    return `<div class="compare-cell empty">${escapeHtml(note)}</div>`;
+  }
+  const existsInCurrent = project.blocks.some((item) => item.id === block.id);
+  const canLocate = side === "new" && existsInCurrent
+    ? `data-action="locate-block" data-block-id="${block.id}" role="button" tabindex="0" title="点击定位到该内容块"`
+    : "";
+  return `<div class="compare-cell" ${canLocate}>
+    <span class="compare-role">${escapeHtml(blockRole(block))}${block.reviewStatus ? ` · ${statusLabel(block.reviewStatus)}` : ""}</span>
+    <p>${escapeHtml(blockDisplayText(block) || "（无文本内容）")}</p>
+    ${block.changeReason.trim() ? `<small>原因：${escapeHtml(block.changeReason)}</small>` : ""}
+  </div>`;
+}
+
+function renderCompareDialog() {
+  const snapshot = project.versions.find((item) => item.id === compareVersionId);
+  if (!snapshot) return "";
+  const rows = alignBlocks(snapshot.blocks, project.blocks);
+  const changed = rows.filter((row) => row.kind === "changed").length;
+  const removed = rows.filter((row) => row.kind === "removed").length;
+  const added = rows.filter((row) => row.kind === "added").length;
+  return `<sl-dialog class="compare-dialog" label="整章并排比较" open data-dialog="compare">
+    <div class="compare-meta">
+      <b>${escapeHtml(snapshot.label)}</b>
+      <span>${new Date(snapshot.createdAt).toLocaleString()}</span>
+      <em>${changed} 处改写 · ${removed} 块当前缺失 · ${added} 块当前新增</em>
+    </div>
+    <div class="compare-grid">
+      <div class="compare-head"><span>快照版本</span><span>当前章节</span></div>
+      ${rows.map((row) => `<div class="compare-row ${row.kind}">
+        ${renderCompareCell(row, "old")}
+        ${renderCompareCell(row, "new")}
+      </div>`).join("")}
+    </div>
+    <sl-button slot="footer" variant="primary" data-action="close-compare">关闭</sl-button>
+  </sl-dialog>`;
+}
+
+function renderRestoreGroup(title: string, rows: AlignedRow[], tone: string) {
+  if (!rows.length) return "";
+  return `<div class="restore-group">
+    <h4><i class="dot ${tone}"></i>${escapeHtml(title)}（${rows.length} 块）</h4>
+    <ul>
+      ${rows.map((row) => {
+        const block = row.oldBlock ?? row.newBlock;
+        if (!block) return "";
+        const note = row.kind === "removed"
+          ? "当前缺失：恢复时插回快照原位置，不覆盖任何其他块"
+          : row.kind === "added"
+            ? "当前新增：恢复后保留在当前相对位置"
+            : "内容不同：按 ID 用快照内容替换";
+        return `<li><b>${escapeHtml(blockRole(block))}</b><span>${escapeHtml(blockSnippet(block, 36))}</span><small>${note}</small></li>`;
+      }).join("")}
+    </ul>
+  </div>`;
+}
+
+function renderRestoreDialog() {
+  const snapshot = project.versions.find((item) => item.id === restoreVersionId);
+  if (!snapshot) return "";
+  const rows = alignBlocks(snapshot.blocks, project.blocks);
+  const changed = rows.filter((row) => row.kind === "changed");
+  const removed = rows.filter((row) => row.kind === "removed");
+  const added = rows.filter((row) => row.kind === "added");
+  const same = rows.filter((row) => row.kind === "same").length;
+  const glossaryChanged = !glossaryEqual(snapshot.glossary, project.glossary);
+  return `<sl-dialog class="restore-dialog" label="确认恢复版本" open data-dialog="restore">
+    <div class="restore-intro">
+      <p>将按 <b>${escapeHtml(snapshot.label)}</b>（${new Date(snapshot.createdAt).toLocaleString()}）替换当前章节。块按 ID 匹配：仅用快照内容覆盖公共块，当前缺失的块插回原相对位置，当前新增块保留在当前相对位置，不会错位覆盖其他内容。</p>
+    </div>
+    <div class="restore-body">
+      ${renderRestoreGroup("将被快照替换的块", changed, "amber")}
+      ${renderRestoreGroup("当前缺失、将插回原位置的块", removed, "red")}
+      ${renderRestoreGroup("当前新增、将保留的块", added, "blue")}
+      ${same ? `<p class="restore-same">另有 ${same} 块内容一致，不受影响。</p>` : ""}
+      ${glossaryChanged ? `<p class="restore-note">术语表也会恢复为该快照保存的内容（快照中 ${snapshot.glossary.length} 条，当前 ${project.glossary.length} 条）。</p>` : ""}
+    </div>
+    <sl-button slot="footer" variant="default" data-action="cancel-restore">取消</sl-button>
+    <sl-button slot="footer" variant="warning" data-action="confirm-restore">确认恢复</sl-button>
+  </sl-dialog>`;
 }
 
 function wireLiveFields() {
@@ -687,7 +1027,7 @@ app.addEventListener("click", (event) => {
     activeIssueId = target.dataset.issueId ?? "";
     activeBlockId = target.dataset.blockId ?? activeBlockId;
     render();
-    requestAnimationFrame(() => app.querySelector<HTMLElement>(".editor-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    flashSourceCard(activeBlockId);
   }
   if (action === "generate") {
     const block = activeBlock();
@@ -753,11 +1093,68 @@ app.addEventListener("click", (event) => {
     commit("全部审核通过", (draft) => { draft.blocks.forEach((block) => { block.reviewStatus = "approved"; }); });
   }
   if (action === "export") {
-    download(`${project.title}-无障碍版.html`, exportHtml(project));
-    document.documentElement.dataset.lastAction = "已导出无障碍 HTML";
+    download(`${project.title}-无障碍版.html`, exportHtml(project, issues()));
+    document.documentElement.dataset.lastAction = "已导出带审校摘要的无障碍 HTML";
     render();
   }
+  if (action === "filter-severity") {
+    issueSeverityFilter = (target.dataset.value as Severity | "all") ?? "all";
+    render();
+  }
+  if (action === "filter-status") {
+    issueStatusFilter = (target.dataset.value as ReviewStatus | "all") ?? "all";
+    render();
+  }
+  if (action === "open-compare") {
+    compareVersionId = selectedVersionId || project.versions[0]?.id || "";
+    render();
+  }
+  if (action === "close-compare") {
+    compareVersionId = "";
+    render();
+  }
+  if (action === "open-restore") {
+    restoreVersionId = selectedVersionId || project.versions[0]?.id || "";
+    render();
+  }
+  if (action === "cancel-restore") {
+    restoreVersionId = "";
+    render();
+  }
+  if (action === "confirm-restore") {
+    const snapshot = project.versions.find((item) => item.id === restoreVersionId);
+    if (snapshot) {
+      const snapshotLabel = snapshot.label;
+      commit(`恢复到${snapshotLabel}`, (draft) => {
+        draft.blocks = restoreBlocks(snapshot.blocks, draft.blocks);
+        draft.glossary = structuredClone(snapshot.glossary);
+      }, false);
+      if (!project.blocks.some((block) => block.id === activeBlockId)) activeBlockId = project.blocks[0]?.id ?? "";
+      activeIssueId = "";
+      restoreVersionId = "";
+      selectedVersionId = snapshot.id;
+      render();
+    }
+  }
+  if (action === "locate-block") {
+    const blockId = target.dataset.blockId ?? "";
+    if (!project.blocks.some((block) => block.id === blockId)) return;
+    compareVersionId = "";
+    activeBlockId = blockId;
+    activeIssueId = "";
+    render();
+    flashSourceCard(blockId);
+  }
   if (action === "import") app.querySelector<HTMLInputElement>("#chapter-file")?.click();
+});
+
+// 点击遮罩或按 Esc 关闭 Shoelace 对话框时同步内部状态。
+app.addEventListener("sl-request-close", (event) => {
+  const dialog = (event.target as HTMLElement).closest<HTMLElement>("[data-dialog]");
+  const kind = dialog?.dataset.dialog;
+  if (kind === "glossary" && showGlossary) { showGlossary = false; render(); }
+  if (kind === "compare" && compareVersionId) { compareVersionId = ""; render(); }
+  if (kind === "restore" && restoreVersionId) { restoreVersionId = ""; render(); }
 });
 
 app.addEventListener("sl-change", (event) => {
@@ -817,7 +1214,7 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key.toLowerCase() === "j" || event.key.toLowerCase() === "k") {
-    const list = issues();
+    const list = filteredIssues();
     if (!list.length) return;
     const current = Math.max(0, list.findIndex((issue) => issue.id === activeIssueId));
     const next = (current + (event.key.toLowerCase() === "j" ? 1 : -1) + list.length) % list.length;
